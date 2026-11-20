@@ -1,0 +1,6 @@
+{
+  "identifier": "main",
+  "description": "Local desktop window with native application commands.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
