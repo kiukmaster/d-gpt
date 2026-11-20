@@ -2,7 +2,9 @@
 
 ## 1. 다운로드하기
 
-이 GitHub 페이지의 **Releases**에서 최신 버전을 열고, **Assets** 아래의 `D-GPT-windows-x64.zip`을 받으세요. **모두 압축 풀기**를 누른 뒤, 풀린 폴더에서 `D-GPT.exe`를 두 번 클릭하세요.
+**[Windows용 D-GPT 다운로드 (ZIP)](https://github.com/kiukmaster/d-gpt/releases/latest/download/D-GPT-windows-x64.zip)**
+
+받은 ZIP 파일을 마우스 오른쪽 버튼으로 누르고 **모두 압축 풀기**를 선택하세요. 풀린 폴더에서 **D-GPT.exe**를 두 번 누르면 앱이 열립니다.
 
 ## 2. API 키를 받아 첫 질문 보내기
 
