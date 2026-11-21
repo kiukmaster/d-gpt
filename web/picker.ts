@@ -1,266 +1,185 @@
-﻿import type { SchoolModel } from './models';
+import type { SchoolModel } from './models';
 import './picker.css';
 
-function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, label = '') {
+const modelExamples: Record<string, string> = {
+  'gpt-6-astra': '여러 논문의 근거를 비교하거나 복잡한 문제를 단계별로 풀 때 잘 맞아요.',
+  'gpt-6-sol': '자료를 분석하고 그 결과를 보고서 초안으로 정리해 줘요.',
+  'gpt-5.6-sol': '과제 코드에서 오류의 원인을 찾고 수정 방법을 설명해 줘요.',
+  'gpt-6-luna': '수업 중 처음 듣는 개념을 짧은 예시로 빠르게 설명해 줘요.',
+  'gpt-5.6-terra': '강의 노트에서 핵심을 뽑고 시험 대비 문제를 만들어 줘요.',
+  'gpt-5.6-luna': '단어 뜻을 묻거나 짧은 예문을 만드는 간단한 질문에 잘 맞아요.',
+  'claude-opus-5-5': '긴 글의 논리를 따라가며 서로 다른 주장과 근거를 꼼꼼히 비교해 줘요.',
+  'claude-sonnet-5-5': '발표 초안의 흐름을 다듬고 슬라이드마다 어울리는 제목을 제안해 줘요.',
+  'claude-haiku-5-5': '짧은 글을 빠르게 요약하거나 설문 답변을 주제별로 묶을 때 잘 맞아요.',
+};
+
+function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text = '') {
   const node = document.createElement(tag);
   node.className = className;
-  node.textContent = label;
+  node.textContent = text;
   return node;
-}
-
-function button(className: string, label: string) {
-  const node = element('button', className, label);
-  node.type = 'button';
-  return node;
-}
-
-function imageLabel(model: SchoolModel) {
-  return '이미지 ' + model.image;
 }
 
 export function openModelPicker(models: readonly SchoolModel[], currentId: string | null, onSelect: (model: SchoolModel) => void, example = false): void {
   if (document.querySelector('dialog.model-picker[open]')) return;
-  const opener = document.activeElement;
+  const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const host = opener?.closest<HTMLElement>('[data-picker-host], .maincol');
+  const bar = opener?.closest<HTMLElement>('[data-picker-bar], .titlebar, .preview-bar');
   const dialog = element('dialog', 'model-picker');
-  const header = element('header', 'mp-header');
-  const title = element('h2', 'mp-title', '모델 선택');
-  title.id = 'mp-title';
-  dialog.setAttribute('aria-labelledby', title.id);
-  const close = button('mp-close', '×');
-  close.setAttribute('aria-label', '모델 선택 닫기');
-  close.onclick = () => dialog.close();
-  header.append(title);
-  if (example) header.append(element('span', 'mp-example', '예시 데이터'));
-  header.append(close);
-
-  const content = element('div', 'mp-content');
-  const stage = element('div', 'mp-stage');
-  const face = element('div', 'mp-face');
-  const ticks = element('div', 'mp-ticks');
-  const majors = element('div', 'mp-majors');
-  const rotor = element('div', 'mp-rotor');
-  const zone = button('mp-zone', '');
-  zone.tabIndex = -1;
-  const disc = element('div', 'mp-disc');
-  const name = element('strong', 'mp-name');
-  const state = element('span', 'mp-state');
-  disc.append(name, state);
-  for (const decoration of [rotor, ticks, majors, disc]) decoration.setAttribute('aria-hidden', 'true');
-  face.append(zone, ticks, majors, rotor, disc);
-  const labels = element('div', 'mp-labels');
-  stage.append(face, labels);
-
-  const footer = element('footer', 'mp-footer');
-  const modelId = element('div', 'mp-full-name');
-  const capabilities = element('div', 'mp-capabilities');
-  const image = element('span', 'mp-image');
-  capabilities.append(image, element('span', '', '동영상 미지원'), element('span', '', '기타 파일 미지원'));
-  const paging = element('div', 'mp-paging');
-  const previous = button('mp-page-button', '‹');
-  const next = button('mp-page-button', '›');
-  previous.setAttribute('aria-label', '이전 모델 페이지');
-  next.setAttribute('aria-label', '다음 모델 페이지');
-  const counter = element('span', 'mp-counter');
-  paging.append(previous, counter, next);
-  const hints = element('p', 'mp-hints');
-  for (const [keys, label] of [['← →', '이동'], ['Enter', '선택'], ['Esc', '닫기']]) {
-    const hint = element('span', '');
-    hint.append(element('kbd', '', keys), label);
-    hints.append(hint);
-  }
-  footer.append(modelId, capabilities, paging, hints);
-  const empty = element('p', 'mp-empty');
-  content.append(stage, empty);
-  const search = element('input', 'mp-search');
-  search.type = 'search';
-  search.placeholder = '모델 검색';
-  search.setAttribute('aria-label', '이름 또는 제공사로 모델 검색');
-  const pageSize = 5;
-  if (models.length > pageSize * 2) header.insertBefore(search, close);
-  dialog.append(header, content, footer);
-  document.body.append(dialog);
-
-  let matches = models;
-  let cursor = Math.max(0, models.findIndex(model => model.id === currentId));
-  let shown = -1;
-  let page = -1;
-  let count = 0;
-  let angle = 0;
-  let committed = false;
-  let stops: HTMLButtonElement[] = [];
-
-  function point(index: number) {
-    const model = matches[index];
-    if (!model || shown === index) return;
-    shown = index;
-    const slot = index - page * pageSize;
-    const degrees = slot * 360 / count;
-    angle += ((degrees - angle) % 360 + 540) % 360 - 180;
-    rotor.style.transform = 'rotate(' + angle + 'deg)';
-    name.textContent = model.id;
-    state.textContent = model.id === currentId ? '지금 사용 중' : '클릭하여 선택';
-    state.dataset.current = String(model.id === currentId);
-    modelId.textContent = model.provider + ' / ' + model.id;
-    image.textContent = imageLabel(model);
-    image.dataset.support = model.image;
-    zone.setAttribute('aria-label', model.id + ' 선택');
-    stops.forEach((stop, i) => {
-      stop.classList.toggle('mp-pointed', slot === i);
-      stop.tabIndex = i === cursor - page * pageSize ? 0 : -1;
-    });
+  dialog.setAttribute('aria-labelledby', 'model-picker-title');
+  const header = element('header', 'pk-head');
+  const title = element('h2', 'pk-title', '모델 선택');
+  title.id = 'model-picker-title';
+  const hint = element('span', 'pk-hint', example ? '예시 데이터' : '숫자 키로 바로 고를 수 있어요');
+  const close = element('button', 'ghost pk-close', '닫기');
+  close.type = 'button';
+  close.append(element('kbd', 'kc sm', 'Esc'));
+  header.append(title, hint, close);
+  const providers = ['OpenAI', 'Claude'] as const;
+  let provider = models.find(model => model.id === currentId)?.provider ?? models[0]?.provider ?? 'OpenAI';
+  const tabList = element('div', 'pk-tabs');
+  tabList.setAttribute('role', 'tablist');
+  tabList.setAttribute('aria-label', '모델 제공사');
+  const stack = element('div', 'stack');
+  stack.id = 'model-picker-panel';
+  stack.setAttribute('role', 'tabpanel');
+  const tabs = providers.map(value => {
+    const tab = element('button', 'pk-tab', value === 'OpenAI' ? 'GPT' : 'Claude');
+    tab.type = 'button';
+    tab.id = 'model-picker-tab-' + value;
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-controls', stack.id);
+    tab.onclick = () => {
+      if (provider === value) return;
+      provider = value;
+      renderPanel();
+      tab.focus({ preventScroll: true });
+    };
+    tabList.append(tab);
+    return tab;
+  });
+  const toolbar = element('div', 'pk-toolbar');
+  const orderLabel = element('span', 'pk-order');
+  toolbar.append(tabList, orderLabel);
+  dialog.append(header, toolbar, stack);
+  let slabs: HTMLButtonElement[] = [];
+  function dismiss() {
+    if (dialog.open) dialog.close();
   }
 
-  function commit(index: number) {
-    const model = matches[index];
-    if (committed || !model) return;
-    committed = true;
-    point(index);
-    state.textContent = '선택했습니다';
-    state.dataset.current = 'true';
-    // Apply immediately. The short pulse only controls the visual dismissal.
-    if (model.id !== currentId) onSelect(model);
-    if (!dialog.open) return;
-    const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (reducedMotion || document.hidden) {
-      dialog.close();
+  function createSlab(model: SchoolModel, index: number) {
+    const current = model.id === currentId;
+    const slab = element('button', 'slab' + (models.indexOf(model) % 2 ? ' c1' : '') + (current ? ' on' : ''));
+    slab.type = 'button';
+    slab.setAttribute('aria-pressed', String(current));
+    const key = element('kbd', 'kc', String(index + 1));
+    key.hidden = index >= 9;
+    const main = element('span', 's-main');
+    const image = '이미지 ' + model.image + (model.imageSource === 'provider' ? ' (제조사 기준)' : '');
+    const access = model.access === 'unconfirmed' ? ' / 키 권한 확인 전' : '';
+    main.append(element('span', 's-name', model.id));
+    if (modelExamples[model.id]) main.append(element('span', 's-example', modelExamples[model.id]));
+    main.append(element('span', 's-desc', image + ' / 동영상 미지원 / 기타 파일 미지원' + access));
+    const state = element('span', 's-state');
+    const pill = element('span', 'pill', '사용 중');
+    pill.hidden = !current;
+    const go = element('span', 's-go', current ? '그대로 사용' : '선택');
+    const arrow = element('span', '', '→');
+    arrow.setAttribute('aria-hidden', 'true');
+    go.append(arrow);
+    state.append(pill, go);
+    slab.append(key, main, state);
+    function setOrigin(event: PointerEvent) {
+      const bounds = slab.getBoundingClientRect();
+      slab.style.setProperty('--mx', (event.clientX - bounds.left) + 'px');
+      slab.style.setProperty('--my', (event.clientY - bounds.top) + 'px');
+    }
+    slab.onpointerenter = slab.onpointerleave = setOrigin;
+    slab.onclick = () => {
+      if (!current) {
+        onSelect(model);
+        if (!matchMedia('(prefers-reduced-motion: reduce)').matches) opener?.animate([
+          { transform: 'scale(.9)' }, { transform: 'scale(1.08)', offset: .55 }, { transform: 'scale(1)' }
+        ], { duration: 400, easing: 'cubic-bezier(.2,.9,.3,1.3)' });
+      }
+      dismiss();
+    };
+    return slab;
+  }
+  function renderPanel() {
+    const visible = models.filter(model => model.provider === provider);
+    const activeTab = tabs[providers.indexOf(provider)];
+    for (const tab of tabs) {
+      tab.tabIndex = tab === activeTab ? 0 : -1;
+      tab.setAttribute('aria-selected', String(tab === activeTab));
+    }
+    stack.setAttribute('aria-labelledby', activeTab.id);
+    orderLabel.textContent = provider === 'OpenAI' ? 'Agents’ Last Exam 점수순' : 'GDPval-AA v2.1 점수순';
+    orderLabel.title = '제조사가 공개한 실무 과제 점수가 높은 모델부터 표시합니다.';
+    stack.className = 'stack rows d2';
+    slabs = visible.map(createSlab);
+    stack.replaceChildren(...slabs);
+    if (!slabs.length) {
+      stack.append(element('p', 'mp-empty', '이 키로 사용할 수 있는 ' + activeTab.textContent + ' 모델이 없습니다.'));
+    }
+  }
+  renderPanel();
+  close.onclick = dismiss;
+  dialog.oncancel = event => { event.preventDefault(); dismiss(); };
+  dialog.onclick = event => { if (event.target === dialog) dismiss(); };
+  dialog.onkeydown = event => {
+    if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (/^[1-9]$/.test(event.key)) {
+      const slab = slabs[Number(event.key) - 1];
+      if (slab) { event.preventDefault(); slab.click(); }
       return;
     }
-    const pulse = disc.animate([
-      { boxShadow: '0 0 0 0 rgba(199,180,255,.72)', scale: '.97' },
-      { boxShadow: '0 0 0 18px rgba(199,180,255,0)', scale: '1' }
-    ], { duration: 205, easing: 'ease-out' });
-    pulse.onfinish = pulse.oncancel = () => { if (dialog.open) dialog.close(); };
-  }
-
-  function renderPage() {
-    page = Math.floor(cursor / pageSize);
-    const start = page * pageSize;
-    const visible = matches.slice(start, start + pageSize);
-    count = visible.length;
-    stage.dataset.count = String(count);
-    shown = -1;
-    labels.replaceChildren();
-    majors.replaceChildren();
-    stops = visible.map((model, slot) => {
-      const index = start + slot;
-      const degrees = slot * 360 / count;
-      const radians = degrees * Math.PI / 180;
-      const x = Math.sin(radians), y = -Math.cos(radians);
-      const major = element('i', 'mp-major');
-      major.style.transform = 'rotate(' + degrees + 'deg)';
-      majors.append(major);
-      const stop = button('mp-stop', '');
-      stop.style.setProperty('--x', String(x));
-      stop.style.setProperty('--y', String(y));
-      stop.style.setProperty('--order', String(slot));
-      stop.dataset.align = Math.abs(x) < .3 ? 'center' : x > 0 ? 'left' : 'right';
-      stop.dataset.vertical = Math.abs(x) >= .3 ? 'middle' : y < 0 ? 'above' : 'below';
-      const line = element('span', 'mp-stop-line');
-      line.append(element('strong', 'mp-stop-name', model.id));
-      const current = model.id === currentId;
-      if (current) line.append(element('span', 'mp-current', '사용 중'));
-      stop.append(line, element('span', 'mp-stop-meta', model.provider + ' / ' + imageLabel(model)));
-      const description = model.provider + ' ' + model.id + ', ' + imageLabel(model) + ', 동영상 미지원, 기타 파일 미지원';
-      stop.title = description;
-      stop.setAttribute('aria-label', description);
-      stop.setAttribute('aria-pressed', String(current));
-      stop.onpointerenter = event => { if (!committed && event.pointerType === 'mouse') point(index); };
-      stop.onpointerleave = () => { if (!committed) point(cursor); };
-      stop.onfocus = () => { if (!committed) { cursor = index; shown = -1; point(index); } };
-      stop.onclick = () => commit(index);
-      labels.append(stop);
-      return stop;
-    });
-    const pages = Math.ceil(matches.length / pageSize);
-    previous.disabled = page === 0;
-    next.disabled = page + 1 >= pages;
-    counter.textContent = (page + 1) + ' / ' + pages;
-    paging.hidden = pages <= 1;
-    stage.hidden = footer.hidden = !count;
-    empty.hidden = !!count;
-    empty.textContent = models.length ? '검색 결과가 없습니다.' : '선택할 수 있는 모델이 없습니다.';
-    point(cursor);
-  }
-
-  function move(index: number) {
-    if (!matches.length || committed) return;
-    cursor = (index + matches.length) % matches.length;
-    if (page !== Math.floor(cursor / pageSize)) renderPage();
-    stops[cursor % pageSize].focus({ preventScroll: true });
-  }
-
-  previous.onclick = () => move((page - 1) * pageSize);
-  next.onclick = () => move((page + 1) * pageSize);
-  search.oninput = () => {
-    if (committed) return;
-    const query = search.value.trim().toLowerCase();
-    matches = query ? models.filter(model => (model.provider + ' ' + model.id).toLowerCase().includes(query)) : models;
-    cursor = Math.max(0, matches.findIndex(model => model.id === currentId));
-    renderPage();
-  };
-  search.onkeydown = event => {
-    if (!event.isComposing && (event.key === 'ArrowDown' || event.key === 'Enter') && count) {
+    const focused = document.activeElement as HTMLButtonElement;
+    const tabIndex = tabs.indexOf(focused);
+    if (tabIndex >= 0 && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
       event.preventDefault();
-      move(cursor);
+      const target = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : 1 - tabIndex;
+      tabs[target].click();
+      tabs[target].focus();
+      return;
     }
-  };
-  stage.onkeydown = event => {
-    if (event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
-    const targets: Record<string, number> = {
-      ArrowRight: cursor + 1, ArrowDown: cursor + 1, ArrowLeft: cursor - 1,
-      ArrowUp: cursor - 1, Home: 0, End: matches.length - 1
-    };
-    if (event.key in targets) {
+    if (tabIndex >= 0 && event.key === 'ArrowDown' && slabs.length) {
       event.preventDefault();
-      move(targets[event.key]);
+      (slabs.find(slab => slab.classList.contains('on')) ?? slabs[0]).focus();
+      return;
+    }
+    const index = slabs.indexOf(focused);
+    if (index < 0) return;
+    const direction = ['ArrowRight', 'ArrowDown'].includes(event.key) ? 1 : ['ArrowLeft', 'ArrowUp'].includes(event.key) ? -1 : 0;
+    if (direction) {
+      event.preventDefault();
+      slabs[(index + direction + slabs.length) % slabs.length].focus();
     }
   };
 
-  function hit(event: MouseEvent) {
-    const bounds = face.getBoundingClientRect();
-    const dx = event.clientX - bounds.left - bounds.width / 2;
-    const dy = event.clientY - bounds.top - bounds.height / 2;
-    if (Math.hypot(dx, dy) < disc.offsetWidth / 2) return cursor;
-    const turn = Math.atan2(dx, -dy) / (2 * Math.PI);
-    return page * pageSize + (Math.round(turn * count) + count) % count;
+  function position() {
+    const bounds = host?.getBoundingClientRect();
+    dialog.style.left = (bounds?.left ?? 0) + 'px';
+    dialog.style.right = (bounds ? Math.max(0, window.innerWidth - bounds.right) : 0) + 'px';
+    dialog.style.top = (bar?.getBoundingClientRect().bottom ?? bounds?.top ?? 0) + 'px';
+    dialog.style.bottom = (bounds ? Math.max(0, window.innerHeight - bounds.bottom) : 0) + 'px';
   }
-  zone.onpointermove = event => { if (!committed && event.pointerType === 'mouse') point(hit(event)); };
-  zone.onpointerdown = event => { if (!committed && event.pointerType !== 'mouse') point(hit(event)); };
-  zone.onpointerleave = event => { if (!committed && event.pointerType === 'mouse') point(cursor); };
-  zone.onclick = () => commit(shown);
-  let wheelDistance = 0;
-  let lastWheelStep = 0;
-  zone.addEventListener('wheel', event => {
-    if (event.ctrlKey || committed || matches.length < 2) return;
-    event.preventDefault();
-    const now = performance.now();
-    if (now - lastWheelStep < 140) return;
-    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? face.clientHeight : 1;
-    wheelDistance += event.deltaY * unit;
-    if (Math.abs(wheelDistance) < 50) return;
-    move(shown + Math.sign(wheelDistance));
-    lastWheelStep = now;
-    wheelDistance = 0;
-  }, { passive: false });
-  dialog.onclick = event => {
-    if (event.target === dialog || event.target === content || event.target === stage) dialog.close();
-  };
-  dialog.addEventListener('close', () => {
+  const resize = new ResizeObserver(position);
+  if (host) resize.observe(host);
+  if (bar) resize.observe(bar);
+  window.addEventListener('resize', position);
+  dialog.onclose = () => {
+    resize.disconnect();
+    window.removeEventListener('resize', position);
     dialog.remove();
-    if (opener instanceof HTMLElement && opener.isConnected) {
-      if (opener instanceof HTMLButtonElement) opener.setAttribute('aria-expanded', 'false');
-      opener.focus({ preventScroll: true });
-    }
-  }, { once: true });
-  renderPage();
+    opener?.setAttribute('aria-expanded', 'false');
+    if (opener?.isConnected) opener.focus({ preventScroll: true });
+  };
+  document.body.append(dialog);
+  position();
   dialog.showModal();
-  if (opener instanceof HTMLButtonElement) {
-    opener.setAttribute('aria-expanded', 'true');
-    const start = opener.getBoundingClientRect();
-    const end = face.getBoundingClientRect();
-    stage.style.setProperty('--fly-x', (start.left + start.width / 2 - end.left - end.width / 2) + 'px');
-    stage.style.setProperty('--fly-y', (start.top + start.height / 2 - end.top - end.height / 2) + 'px');
-  }
-  stage.classList.add('mp-enter');
-  (stops[cursor % pageSize] ?? close).focus({ preventScroll: true });
+  opener?.setAttribute('aria-expanded', 'true');
+  (slabs.find(slab => slab.classList.contains('on')) ?? tabs[providers.indexOf(provider)]).focus({ preventScroll: true });
+  void stack.offsetWidth;
+  dialog.classList.add('picking');
 }

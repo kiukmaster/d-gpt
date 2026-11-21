@@ -26,6 +26,8 @@ pub(crate) struct Turn {
     image: Option<Image>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     interrupted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    usage: Option<super::Usage>,
 }
 
 #[derive(Serialize, Deserialize)]

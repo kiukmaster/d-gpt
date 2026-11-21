@@ -1,4 +1,6 @@
 mod history;
+mod errors;
+use errors::{school_response, ApiResult, CommandError};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use reqwest::{Client, Response};
@@ -27,7 +29,12 @@ fn entry() -> Result<keyring::Entry> {
     if !cfg!(any(target_os = "windows", target_os = "macos")) {
         return Err(STORAGE);
     }
-    keyring::Entry::new("D-GPT.school.gateway", "student-key").map_err(|_| STORAGE)
+    let service = if cfg!(feature = "green-edition") {
+        "D-GPT.Green.school.gateway"
+    } else {
+        "D-GPT.school.gateway"
+    };
+    keyring::Entry::new(service, "student-key").map_err(|_| STORAGE)
 }
 
 fn saved_key() -> Result<String> {
@@ -41,69 +48,37 @@ fn network_error(error: reqwest::Error) -> &'static str {
     if error.is_timeout() { "학교 서버 응답 시간이 초과되었습니다." } else { NETWORK }
 }
 
-fn success(response: Response) -> Result<Response> {
-    if response.status().is_success() {
-        return Ok(response);
-    }
-    Err(match response.status().as_u16() {
-        401 | 403 => "학교에서 키 또는 접근 권한을 확인하지 못했습니다.",
-        413 => SIZE,
-        429 => "학교 사용 한도에 도달했습니다. 잠시 후 다시 시도해 주세요.",
-        _ => "학교 서버가 요청을 처리하지 못했습니다.",
-    })
-}
-
-async fn chat_response(mut response: Response) -> Result<Response> {
-    if response.status() == reqwest::StatusCode::BAD_REQUEST {
-        let mut body = Vec::new();
-        loop {
-            match response.chunk().await {
-                Ok(Some(chunk)) if chunk.len() <= 8192 - body.len() => body.extend_from_slice(&chunk),
-                Ok(None) => {
-                    if let Ok(error) = serde_json::from_slice::<Value>(&body) {
-                        if error.pointer("/error/code").and_then(Value::as_str) == Some("context_length_exceeded") {
-                            return Err("대화가 모델의 입력 한도에 도달했습니다. 질문을 줄이거나 새 대화를 시작해 주세요.");
-                        }
-                    }
-                    break;
-                }
-                _ => break,
-            }
-        }
-    }
-    success(response)
-}
-
 #[derive(Clone, Deserialize, Serialize)]
 struct Models {
     data: Vec<Value>,
 }
 
-async fn fetch_models(client: &Client, key: &str) -> Result<Models> {
+async fn fetch_models(client: &Client, key: &str) -> ApiResult<Models> {
     let request = client.get(format!("{HOST}/v1/models"))
         .bearer_auth(key).timeout(Duration::from_secs(15));
-    let mut response = success(request.send().await.map_err(network_error)?)?;
+    let mut response = school_response(request.send().await.map_err(network_error)?, false).await?;
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(network_error)? {
-        if bytes.len().saturating_add(chunk.len()) > 1024 * 1024 { return Err(FORMAT); }
+        if bytes.len().saturating_add(chunk.len()) > 1024 * 1024 { return Err(FORMAT.into()); }
         bytes.extend_from_slice(&chunk);
     }
-    let models: Models = serde_json::from_slice(&bytes).map_err(|_| FORMAT)?;
+    let mut models: Models = serde_json::from_slice(&bytes).map_err(|_| FORMAT)?;
     if models.data.iter().any(|model| model["id"].as_str().map_or(true, str::is_empty)) {
-        return Err(FORMAT);
+        return Err(FORMAT.into());
     }
+    models.data.retain(|model| model["id"].as_str().is_some_and(supported_model));
     Ok(models)
 }
 
 #[tauri::command]
-async fn connect_key(key: String, state: State<'_, Gateway>) -> Result<Models> {
+async fn connect_key(key: String, state: State<'_, Gateway>) -> ApiResult<Models> {
     let key = key.trim();
     if key.is_empty() || key.len() > 4096 || !key.bytes().all(|b| b.is_ascii_graphic()) {
-        return Err("개인 키를 확인해 주세요.");
+        return Err("개인 키를 확인해 주세요.".into());
     }
     #[cfg(windows)]
     if key.len() > 1280 {
-        return Err("이 키는 Windows 자격 증명 저장소에 보관하기에 너무 깁니다.");
+        return Err("이 키는 Windows 자격 증명 저장소에 보관하기에 너무 깁니다.".into());
     }
     let mut cache = state.credentials.lock().await;
     let models = fetch_models(&state.client, key).await?;
@@ -114,7 +89,7 @@ async fn connect_key(key: String, state: State<'_, Gateway>) -> Result<Models> {
 }
 
 #[tauri::command]
-async fn list_models(state: State<'_, Gateway>) -> Result<Models> {
+async fn list_models(state: State<'_, Gateway>) -> ApiResult<Models> {
     let mut cache = state.credentials.lock().await;
     *cache = None;
     let key = saved_key()?;
@@ -151,16 +126,8 @@ struct Image { mime: String, data: String }
 #[serde(deny_unknown_fields)]
 struct Message { role: String, content: String, image: Option<Image> }
 
-fn is_claude(id: &str) -> Result<bool> {
-    if id.strip_prefix("anthropic/").unwrap_or(id).starts_with("claude-") {
-        return Ok(true);
-    }
-    let name = id.strip_prefix("openai/").unwrap_or(id);
-    let series = name.split('-').next().unwrap_or("");
-    if name.starts_with("gpt-") || series.strip_prefix('o').is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())) {
-        return Ok(false);
-    }
-    Err("지원하지 않는 모델입니다.")
+fn supported_model(id: &str) -> bool {
+    include_str!("../../shared/chat-models.txt").lines().any(|allowed| allowed == id)
 }
 
 fn image_block(image: Image, claude: bool) -> Result<Value> {
@@ -183,7 +150,9 @@ fn image_block(image: Image, claude: bool) -> Result<Value> {
 
 fn chat_body(model: &Value, messages: Vec<Message>, claude: bool) -> Result<Vec<u8>> {
     if messages.is_empty() { return Err("질문을 입력해 주세요."); }
-    let image_allowed = model["input_modalities"].as_array().is_some_and(|a| a.iter().any(|v| v == "image"));
+    let image_allowed = model["input_modalities"].as_array()
+        .filter(|values| !values.is_empty() && values.iter().all(|v| v.as_str().is_some_and(|s| !s.trim().is_empty())))
+        .map_or(claude, |values| values.iter().any(|v| v == "image"));
     let mut total = 0usize;
     let mut turns = Vec::new();
     for message in messages {
@@ -212,48 +181,87 @@ fn chat_body(model: &Value, messages: Vec<Message>, claude: bool) -> Result<Vec<
 #[serde(tag="type", rename_all="lowercase")]
 enum Event {
     Text { text: String },
-    Usage {
-        #[serde(skip_serializing_if="Option::is_none")]
-        input: Option<u64>,
-        #[serde(skip_serializing_if="Option::is_none")]
-        output: Option<u64>,
-    },
 }
 
-fn dispatch(data: &str, claude: bool, channel: &Channel<Event>, finish: &mut Option<String>) -> Result<bool> {
-    if !claude && data.trim() == "[DONE]" { return completion(finish.as_deref()); }
+#[derive(Serialize)]
+struct ChatResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<Usage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interruption: Option<&'static str>,
+}
+
+#[derive(Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Usage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_read: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_write: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uncached_input: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ordinary_input: Option<u64>,
+}
+
+impl Usage {
+    fn update_claude(&mut self, usage: &Value, delta: bool) {
+        self.ordinary_input = usage["input_tokens"].as_u64().or(self.ordinary_input);
+        self.cache_read = usage["cache_read_input_tokens"].as_u64().or(self.cache_read);
+        self.cache_write = usage["cache_creation_input_tokens"].as_u64().or(self.cache_write);
+        self.uncached_input = self.ordinary_input.zip(self.cache_write)
+            .and_then(|(ordinary, write)| ordinary.checked_add(write));
+        self.input = self.uncached_input.zip(self.cache_read)
+            .and_then(|(uncached, read)| uncached.checked_add(read));
+        // message_start contains a provisional output count.
+        if delta { self.output = usage["output_tokens"].as_u64().or(self.output); }
+    }
+
+    fn update_openai(&mut self, usage: &Value) {
+        self.input = usage["prompt_tokens"].as_u64().or(self.input);
+        self.output = usage["completion_tokens"].as_u64().or(self.output);
+        self.total = usage["total_tokens"].as_u64().or(self.total);
+        let details = &usage["prompt_tokens_details"];
+        self.cache_read = details["cached_tokens"].as_u64().or(self.cache_read);
+        self.cache_write = details["cache_write_tokens"].as_u64().or(self.cache_write);
+        self.uncached_input = self.input.zip(self.cache_read)
+            .and_then(|(input, read)| input.checked_sub(read));
+    }
+}
+
+fn dispatch(data: &str, status: u16, claude: bool, channel: &Channel<Event>, finish: &mut Option<String>, usage: &mut Usage) -> ApiResult<bool> {
+    if !claude && data.trim() == "[DONE]" { return Ok(true); }
     let value: Value = serde_json::from_str(data).map_err(|_| FORMAT)?;
     if value.get("error").is_some() || value["type"] == "error" {
-        return Err("학교에서 응답 생성을 중단했습니다.");
+        return Err(CommandError::school(status, &value, claude));
     }
-    if claude && value["type"] == "message_stop" { return completion(finish.as_deref()); }
+    if claude && value["type"] == "message_stop" { return Ok(true); }
     let reason = if claude { value.pointer("/delta/stop_reason") } else { value.pointer("/choices/0/finish_reason") };
     if let Some(reason) = reason.and_then(Value::as_str) { *finish = Some(reason.to_owned()); }
     let text = if claude { value.pointer("/delta/text") } else { value.pointer("/choices/0/delta/content") };
     if let Some(text) = text.and_then(Value::as_str).filter(|s| !s.is_empty()) {
         channel.send(Event::Text { text: text.to_owned() }).map_err(|_| "대화 화면이 닫혔습니다.")?;
     }
-    let usage = value.pointer("/message/usage").unwrap_or(&value["usage"]);
-    let (input, output) = if claude { (&usage["input_tokens"], &usage["output_tokens"]) }
-        else { (&usage["prompt_tokens"], &usage["completion_tokens"]) };
-    if input.is_u64() || output.is_u64() {
-        channel.send(Event::Usage { input:input.as_u64(), output:output.as_u64() })
-            .map_err(|_| "대화 화면이 닫혔습니다.")?;
+    if claude {
+        if let Some(start) = value.pointer("/message/usage") { usage.update_claude(start, false); }
+        if value["type"] == "message_delta" && value["usage"].is_object() {
+            usage.update_claude(&value["usage"], true);
+        }
+    } else if value["usage"].is_object() && (finish.is_some() || value["choices"].as_array().is_some_and(Vec::is_empty)) {
+        usage.update_openai(&value["usage"]);
     }
     Ok(false)
 }
 
-fn completion(reason: Option<&str>) -> Result<bool> {
-    match reason {
-        None => Err("답변 완료 상태를 확인할 수 없습니다."),
-        Some("length" | "max_tokens" | "model_context_window_exceeded") => Err("답변 길이 한도에 도달했습니다."),
-        Some("content_filter" | "refusal") => Err("모델이 답변 생성을 중단했습니다."),
-        Some(_) => Ok(true),
-    }
-}
-
-async fn stream(mut response: Response, claude: bool, channel: &Channel<Event>) -> Result<()> {
+async fn stream(mut response: Response, claude: bool, channel: &Channel<Event>) -> ApiResult<ChatResult> {
     let mut finish = None;
+    let mut usage = Usage::default();
     let mut line = Vec::new();
     let mut data = String::new();
     let mut after_cr = false;
@@ -263,12 +271,20 @@ async fn stream(mut response: Response, claude: bool, channel: &Channel<Event>) 
             after_cr = byte == b'\r';
             if !after_cr && byte != b'\n' {
                 line.push(byte);
-                if line.len() + data.len() > 1024 * 1024 { return Err(FORMAT); }
+                if line.len() + data.len() > 1024 * 1024 { return Err(FORMAT.into()); }
                 continue;
             }
             let field = std::str::from_utf8(&line).map_err(|_| FORMAT)?;
             if field.is_empty() && !data.is_empty() {
-                if dispatch(data.trim_end_matches('\n'), claude, channel, &mut finish)? { return Ok(()); }
+                if dispatch(data.trim_end_matches('\n'), response.status().as_u16(), claude, channel, &mut finish, &mut usage)? {
+                    usage.total = usage.total.or_else(|| usage.input?.checked_add(usage.output?));
+                    let interruption = match finish.as_deref().ok_or("답변 완료 상태를 확인할 수 없습니다.")? {
+                        "length" | "max_tokens" | "model_context_window_exceeded" => Some("답변 길이 한도에 도달했습니다."),
+                        "content_filter" | "refusal" => Some("모델이 답변 생성을 중단했습니다."),
+                        _ => None,
+                    };
+                    return Ok(ChatResult { usage: (usage != Usage::default()).then_some(usage), interruption });
+                }
                 data.clear();
             } else if let Some(part) = field.strip_prefix("data:") {
                 data.push_str(part.strip_prefix(' ').unwrap_or(part));
@@ -277,11 +293,12 @@ async fn stream(mut response: Response, claude: bool, channel: &Channel<Event>) 
             line.clear();
         }
     }
-    Err("답변을 모두 받기 전에 연결이 끊어졌습니다.")
+    Err("답변을 모두 받기 전에 연결이 끊어졌습니다.".into())
 }
 
-async fn chat(state: &Gateway, model_id: &str, messages: Vec<Message>, channel: &Channel<Event>) -> Result<()> {
-    let claude = is_claude(model_id)?;
+async fn chat(state: &Gateway, model_id: &str, messages: Vec<Message>, channel: &Channel<Event>) -> ApiResult<ChatResult> {
+    if !supported_model(model_id) { return Err("지원하지 않는 모델입니다.".into()); }
+    let claude = model_id.starts_with("claude-");
     let (key, model) = {
         let mut cache = state.credentials.lock().await;
         let key = saved_key()?;
@@ -289,34 +306,41 @@ async fn chat(state: &Gateway, model_id: &str, messages: Vec<Message>, channel: 
         if cache.as_ref().map(|(id, _)| *id) != Some(fingerprint) {
             *cache = Some((fingerprint, fetch_models(&state.client, &key).await?));
         }
-        let model = cache.as_ref().and_then(|(_, models)| models.data.iter().find(|m| m["id"] == model_id))
-            .ok_or("현재 키에서 사용할 수 없는 모델입니다.")?.clone();
+        let model = match cache.as_ref().and_then(|(_, models)| models.data.iter().find(|m| m["id"] == model_id)) {
+            Some(model) => model.clone(),
+            None if claude => json!({ "id": model_id }),
+            None => return Err("현재 키에서 사용할 수 없는 모델입니다.".into()),
+        };
         (key, model)
     };
     if matches!(model["model_type"].as_str(), Some("embedding" | "image_generation" | "video_generation" | "transcription" | "speech")) {
-        return Err("이 모델은 대화를 지원하지 않습니다.");
+        return Err("이 모델은 대화를 지원하지 않습니다.".into());
     }
     let body = chat_body(&model, messages, claude)?;
     let path = if claude { "/v1/messages" } else { "/v1/chat/completions" };
-    let mut request = state.client.post(format!("{HOST}{path}")).bearer_auth(key)
+    let request = state.client.post(format!("{HOST}{path}"))
         .header("Content-Type", "application/json").header("Accept", "text/event-stream").body(body);
-    if claude { request = request.header("anthropic-version", "2023-06-01"); }
-    let response = chat_response(request.send().await.map_err(network_error)?).await?;
+    let request = if claude {
+        request.header("x-api-key", key).header("anthropic-version", "2023-06-01")
+    } else {
+        request.bearer_auth(key)
+    };
+    let response = school_response(request.send().await.map_err(network_error)?, claude).await?;
     stream(response, claude, channel).await
 }
 
 #[tauri::command]
-async fn send_chat(model_id: String, messages: Vec<Message>, on_event: Channel<Event>, request_id: String, state: State<'_, Gateway>) -> Result<()> {
-    if request_id.is_empty() || request_id.len() > 128 { return Err("요청 번호를 확인해 주세요."); }
+async fn send_chat(model_id: String, messages: Vec<Message>, on_event: Channel<Event>, request_id: String, state: State<'_, Gateway>) -> ApiResult<ChatResult> {
+    if request_id.is_empty() || request_id.len() > 128 { return Err("요청 번호를 확인해 주세요.".into()); }
     let (sender, receiver) = oneshot::channel();
     {
         let mut active = state.active.lock().await;
-        if active.contains_key(&request_id) { return Err("이미 진행 중인 요청입니다."); }
+        if active.contains_key(&request_id) { return Err("이미 진행 중인 요청입니다.".into()); }
         active.insert(request_id.clone(), Some(sender));
     }
     let result = tokio::select! {
         biased;
-        _ = receiver => Err("답변 생성을 중지했습니다."),
+        _ = receiver => Err("답변 생성을 중지했습니다.".into()),
         result = chat(&state, &model_id, messages, &on_event) => result,
     };
     state.active.lock().await.remove(&request_id);

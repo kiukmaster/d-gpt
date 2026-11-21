@@ -1,10 +1,21 @@
 import { invoke } from '@tauri-apps/api/core';
 
+export interface Usage {
+  input?: number;
+  output?: number;
+  total?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  uncachedInput?: number;
+  ordinaryInput?: number;
+}
+
 export interface Turn {
   role: 'user' | 'assistant';
   content: string;
   image?: { mime: string; data: string };
   interrupted?: boolean;
+  usage?: Usage;
 }
 
 export interface Thread {

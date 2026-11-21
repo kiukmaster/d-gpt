@@ -1,6 +1,6 @@
 {
   "name": "dgpt-desktop",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,10 +8,13 @@
     "build": "tsc --noEmit && vite build",
     "desktop": "tauri dev",
     "desktop:build": "tauri build",
+    "build:green": "tsc --noEmit && vite build --mode green --outDir dist-green",
+    "desktop:build:green": "tauri build --config src-tauri/tauri.green.conf.json",
     "preview:picker": "node scripts/preview.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2"
+    "@tauri-apps/api": "^2",
+    "marked": "18.2.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

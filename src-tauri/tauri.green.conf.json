@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "D-GPT Green",
+  "identifier": "kr.dgpt.students.desktop.green",
+  "build": {
+    "features": ["green-edition"],
+    "beforeDevCommand": "npm run dev -- --mode green --port 1421",
+    "devUrl": "http://127.0.0.1:1421",
+    "beforeBuildCommand": "npm run build:green",
+    "frontendDist": "../dist-green"
+  },
+  "app": {
+    "windows": [
+      { "title": "D-GPT Green", "width": 1040, "height": 760, "minWidth": 440, "minHeight": 520, "dragDropEnabled": false }
+    ]
+  }
+}

@@ -1,8 +1,11 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { normalizeModels, resolveModel, type SchoolModel } from './models';
 import { openModelPicker } from './picker';
-import { deleteThread, listThreads, readThread, writeThread, type Thread, type Turn } from './history';
+import { renderMarkdown } from './markdown';
+import { deleteThread, listThreads, readThread, writeThread, type Thread, type Turn, type Usage } from './history';
+import './fonts.css';
 import './shell.css';
+import './green-theme';
 
 function element<T extends HTMLElement = HTMLElement>(id: string): T {
   return document.getElementById(id) as T;
@@ -14,11 +17,13 @@ const turns = element('turns');
 const status = element('status');
 const keyStatus = element('keyStatus');
 const limit = 10 * 1024 * 1024;
-type StreamEvent = {type:'text'|'usage', text?:string, input?:number, output?:number};
+type StreamText = { type: 'text'; text: string };
+type ChatResult = { usage?: Usage; interruption?: string };
 let models: SchoolModel[] = [];
 let selected: SchoolModel | null = null;
 let thread: Thread | null = null;
 let attachment: Turn['image'];
+let previewUrl: string | undefined;
 let busy = false;
 let requestId: string | null = null;
 let connected = false;
@@ -27,11 +32,26 @@ let canCancel = false;
 function feedback(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
+function explainSchoolError(error: unknown) {
+  if (!error || typeof error !== 'object' || !('kind' in error) || error.kind !== 'school_api' ||
+      !('reason' in error) || typeof error.reason !== 'string' || !('action' in error) || typeof error.action !== 'string' ||
+      !('status' in error) || typeof error.status !== 'number') return feedback(error);
+  const dialog = element<HTMLDialogElement>('schoolError');
+  element('schoolErrorReason').textContent = error.reason;
+  element('schoolErrorAction').textContent = error.action;
+  const context = error.status >= 400 ? '오류 ' + error.status : '응답 도중 발생';
+  element('schoolErrorCode').textContent = 'code' in error && typeof error.code === 'string' ? context + ' / ' + error.code : context;
+  if (!dialog.open) dialog.showModal();
+  return error.reason;
+}
+element<HTMLDialogElement>('schoolError').onclose = () => {
+  (element('setup').hidden ? message : key).focus({ preventScroll: true });
+};
 function preference() {
   try { return localStorage.getItem('preferredModel'); } catch { return null; }
 }
 function updateSend() {
-  element<HTMLButtonElement>('send').disabled = busy || !selected || !(message.value.trim() || attachment);
+  element<HTMLButtonElement>('send').disabled = busy || !selected || !(message.value.trim() || attachment) || Boolean(attachment && selected.image !== '지원');
 }
 function updateConnect() {
   element<HTMLButtonElement>('connect').disabled = busy || !key.value.trim();
@@ -40,18 +60,19 @@ function update() {
   const model = element<HTMLButtonElement>('model');
   element('modelName').textContent = selected?.id ?? '사용 가능한 모델이 없습니다';
   const modelIndex = selected ? models.indexOf(selected) : -1;
-  const dialPageSize = 5;
-  const slot = Math.max(0, modelIndex) % dialPageSize;
-  const count = Math.min(dialPageSize, models.length - Math.max(0, modelIndex) + slot);
-  model.style.setProperty('--model-angle', (count ? slot * 360 / count : 0) + 'deg');
+  element('modelSwatch').style.setProperty('--model-color', modelIndex > 0 && modelIndex % 2 ? 'var(--model-alt, #2c63e6)' : 'var(--fill)');
   model.setAttribute('aria-label', selected ? '모델 바꾸기, 현재 모델 ' + selected.id : '사용 가능한 모델이 없습니다');
   model.disabled = busy || !models.length;
   const imageSupported = selected?.image === '지원';
-  element<HTMLButtonElement>('attach').disabled = busy || !imageSupported;
-  element('attach').title = imageSupported ? 'PNG, JPEG, WebP 이미지를 첨부하세요' :
-    selected?.image === '미지원' ? '이 모델은 이미지 입력을 지원하지 않습니다.' : '이 모델의 이미지 지원을 확인할 수 없습니다.';
+  element<HTMLButtonElement>('attach').disabled = busy || !selected;
+  element('attach').title = imageSupported ? '이미지 선택, 붙여넣기 또는 끌어다 놓기' : imageSupportHint();
   element<HTMLButtonElement>('removeImage').disabled = busy;
   element('removeImage').hidden = !attachment;
+  if (!attachment && previewUrl) {
+    element('attachmentPreview').removeAttribute('src');
+    URL.revokeObjectURL(previewUrl);
+    previewUrl = undefined;
+  }
   updateSend();
   element('send').hidden = Boolean(requestId);
   element('stop').hidden = !requestId;
@@ -71,6 +92,8 @@ function showSetup(hasKey: boolean) {
   element('back').hidden = !connected;
   element('removeKey').hidden = !hasKey;
   element('retry').hidden = !hasKey || connected;
+  element('keyCreditNote').hidden = !hasKey;
+  key.removeAttribute('aria-invalid');
   key.value = '';
   updateConnect();
   key.type = 'password';
@@ -89,11 +112,11 @@ async function loadModels(raw: {data:unknown[]}) {
   models = normalizeModels(raw);
   selected = resolveModel(models, preference());
   connected = true;
-  if (selected?.image !== '지원') attachment = undefined;
   await refreshHistory();
 }
 async function attemptLoad(replacement?: string) {
   busy = true;
+  element('connect').setAttribute('aria-busy', String(Boolean(replacement)));
   update();
   keyStatus.textContent = '연결을 확인하고 있습니다.';
   let registered = false;
@@ -114,12 +137,15 @@ async function attemptLoad(replacement?: string) {
       element('start').focus();
     } else { showWorkspace(); }
   } catch (error) {
-    const detail = feedback(error);
+    const detail = explainSchoolError(error);
     const missing = detail === '등록된 API 키가 없습니다.';
     showSetup(registered || connected || (!replacement && !missing) || !element('removeKey').hidden);
-    if (replacement && !registered) key.value = replacement;
+    if (replacement && !registered) {
+      key.value = replacement;
+      if (detail.includes('키') && !detail.includes('연결')) key.setAttribute('aria-invalid', 'true');
+    }
     keyStatus.textContent = missing ? '' : detail;
-  } finally { busy = false; update(); }
+  } finally { element('connect').removeAttribute('aria-busy'); busy = false; update(); }
 }
 element('start').onclick = () => {
   showWorkspace();
@@ -131,7 +157,7 @@ element('start').onclick = () => {
   else message.focus();
 };
 element('replace').onclick = () => showSetup(true);
-key.oninput = updateConnect;
+key.oninput = () => { key.removeAttribute('aria-invalid'); updateConnect(); };
 element('eye').onclick = () => {
   key.type = key.type === 'password' ? 'text' : 'password';
   const visible = key.type === 'text';
@@ -145,6 +171,7 @@ element('paste').onclick = async () => {
     const pasted = await navigator.clipboard.readText();
     if (!busy && !element('keyForm').hidden && !element('setup').hidden) {
       key.value = pasted.trim();
+      key.removeAttribute('aria-invalid');
       keyStatus.textContent = key.value ? '' : '복사한 API 키가 없습니다.';
       updateConnect();
     }
@@ -199,17 +226,63 @@ function addCopyButton(article: HTMLElement, turn: Turn) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'copy-answer';
-  button.textContent = '복사';
+  const label = document.createElement('span');
+  label.textContent = '복사';
+  const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  icon.setAttribute('class', 'ui-icon');
+  icon.setAttribute('aria-hidden', 'true');
+  const glyph = document.createElementNS(icon.namespaceURI, 'use');
+  glyph.setAttribute('href', '#icon-copy');
+  icon.append(glyph);
+  button.append(icon, label);
   button.setAttribute('aria-label', '답변 복사하기');
   button.onclick = async () => {
-    try { await navigator.clipboard.writeText(turn.content); status.textContent = '답변을 복사했습니다.'; }
+    try {
+      await navigator.clipboard.writeText(turn.content);
+      label.textContent = '복사됨';
+      glyph.setAttribute('href', '#icon-check');
+      button.classList.add('done');
+      status.textContent = '답변을 복사했습니다.';
+    }
     catch { status.textContent = '답변을 선택한 뒤 복사 단축키를 눌러 주세요.'; }
   };
   article.append(button);
 }
-function renderTurn(turn: Turn) {
+const tokenNumber = new Intl.NumberFormat('ko-KR');
+function addUsage(article: HTMLElement, usage?: Usage) {
+  const details = document.createElement('details');
+  details.className = 'turn-usage';
+  const summary = document.createElement('summary');
+  summary.textContent = usage?.total === undefined ? '토큰 사용량' : '토큰 ' + tokenNumber.format(usage.total) + '개';
+  details.append(summary);
+  const list = document.createElement('dl');
+  function row(label: string, value: number | undefined) {
+    if (value === undefined) return;
+    const term = document.createElement('dt');
+    term.textContent = label;
+    const count = document.createElement('dd');
+    count.textContent = tokenNumber.format(value);
+    list.append(term, count);
+  }
+  row('전체 입력', usage?.input);
+  row('출력', usage?.output);
+  row('합계', usage?.total);
+  row('Cache Hit', usage?.cacheRead);
+  row('CacheMiss', usage?.uncachedInput);
+  row('캐시에 새로 쓴 입력', usage?.cacheWrite);
+  if (usage?.uncachedInput === undefined) row('일반 입력', usage?.ordinaryInput);
+  if (list.childElementCount) details.append(list);
+  if (!usage || usage.cacheRead === undefined) {
+    const note = document.createElement('p');
+    note.textContent = usage ? '캐시 재사용 정보는 제공되지 않았어요.' : '이 답변에 저장된 토큰 정보가 없어요.';
+    details.append(note);
+  }
+  article.append(details);
+}
+function renderTurn(turn: Turn, streaming = false) {
   const article = document.createElement('article');
   if (turn.role === 'user') article.className = 'user-turn';
+  article.classList.toggle('streaming', streaming);
   const author = document.createElement('strong');
   author.textContent = turn.role === 'user' ? '나' : 'D-GPT';
   article.append(author);
@@ -219,12 +292,15 @@ function renderTurn(turn: Turn) {
     img.src = 'data:' + turn.image.mime + ';base64,' + turn.image.data;
     article.append(img);
   }
-  const body = document.createTextNode(turn.content);
-  article.append(body);
+  const content = document.createElement('div');
+  content.className = 'turn-content';
+  if (!streaming) renderMarkdown(content, turn.content);
+  article.append(content);
   if (turn.interrupted) article.append(document.createElement('br'), '응답이 중단되었습니다.');
   addCopyButton(article, turn);
+  if (turn.role === 'assistant' && !streaming) addUsage(article, turn.usage);
   turns.append(article);
-  return body;
+  return { content, article };
 }
 function updateConversationLayout() {
   const home = !thread?.turns.length;
@@ -241,7 +317,7 @@ function resizeMessage() {
 function renderThread() {
   updateConversationLayout();
   turns.replaceChildren();
-  thread?.turns.forEach(renderTurn);
+  thread?.turns.forEach(turn => renderTurn(turn));
   turns.scrollTop = turns.scrollHeight;
   update();
 }
@@ -322,7 +398,11 @@ element('toggle').onclick = () => { setSidebar(true); element('sideClose').focus
 function closeSidebar() { setSidebar(false); element('toggle').focus(); }
 element('sideClose').onclick = closeSidebar;
 element('sideBackdrop').onclick = closeSidebar;
-element('shortcut').textContent = /Mac/.test(navigator.platform) ? '⌘ N' : 'Ctrl N';
+for (const text of [/Mac/.test(navigator.platform) ? '⌘' : 'Ctrl', 'N']) {
+  const keycap = document.createElement('kbd');
+  keycap.textContent = text;
+  element('shortcut').append(keycap);
+}
 document.addEventListener('keydown', event => {
   if (element('workspace').hidden || document.querySelector('dialog[open], [aria-modal="true"]')) return;
   if (event.key === 'Escape' && narrow.matches && !element('sidebar').hidden) closeSidebar();
@@ -338,18 +418,31 @@ element('model').onclick = () => {
     if (selected && !busy) {
       try { localStorage.setItem('preferredModel', selected.id); } catch { /* Preferences are optional. */ }
       if (attachment && selected.image !== '지원') {
-        attachment = undefined;
-        status.textContent = '선택한 모델에서 이미지를 사용할 수 없어 첨부를 해제했습니다.';
+        status.textContent = '첨부한 이미지를 보내려면 이미지 지원 모델을 고르세요. 이미지를 빼면 글만 보낼 수 있어요.';
+      } else {
+        status.textContent = '';
       }
     }
     update();
   });
 };
-element('attach').onclick = () => file.click();
-element('removeImage').onclick = () => { attachment = undefined; update(); };
-file.onchange = async () => {
-  const item = file.files?.[0]; file.value = '';
-  if (!item || busy || selected?.image !== '지원') return;
+function imageSupportHint() {
+  const reason = selected?.image === '미지원' ? '선택한 모델은 글만 받을 수 있어요.' : '선택한 모델의 이미지 지원 여부를 확인할 수 없어요.';
+  return reason + (models.some(model => model.image === '지원') ? ' 모델 목록에서 이미지 지원 모델을 골라 주세요.' : ' 연결된 키에 이미지 지원이 확인된 모델이 없어요.');
+}
+element('attach').onclick = () => {
+  if (selected?.image === '지원') { file.click(); return; }
+  status.textContent = imageSupportHint();
+  if (models.some(model => model.image === '지원')) {
+    const model = element<HTMLButtonElement>('model');
+    model.focus();
+    model.click();
+  }
+};
+element('removeImage').onclick = () => { attachment = undefined; update(); status.textContent = ''; message.focus(); };
+async function attachImage(item: File) {
+  if (busy) return;
+  if (selected?.image !== '지원') { status.textContent = imageSupportHint(); return; }
   busy = true; update();
   try {
     if (!item.size) throw Error('내용이 없는 파일입니다.');
@@ -371,13 +464,60 @@ file.onchange = async () => {
       };
       reader.readAsDataURL(item);
     });
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = URL.createObjectURL(item.slice(0, item.size, mime));
     attachment = {mime, data};
-    element('removeImage').textContent = item.name + ' ×';
-    element('removeImage').setAttribute('aria-label', item.name + ' 첨부 취소하기');
+    const name = item.name || '붙여넣은 이미지';
+    element<HTMLImageElement>('attachmentPreview').src = previewUrl;
+    element('attachmentName').textContent = name;
+    element('removeImage').setAttribute('aria-label', name + ' 첨부 취소하기');
     status.textContent = '';
   } catch (error) { status.textContent = feedback(error); }
-  finally { busy = false; update(); }
+  finally { busy = false; update(); message.focus(); }
+}
+file.onchange = () => {
+  const item = file.files?.[0]; file.value = '';
+  if (item) void attachImage(item);
 };
+element('compose').onpaste = event => {
+  const files = event.clipboardData?.files;
+  if (!files?.length) return;
+  event.preventDefault();
+  if (files.length === 1) void attachImage(files[0]);
+  else status.textContent = '한 메시지에는 이미지 한 장을 첨부할 수 있어요.';
+};
+const stage = element('body');
+stage.ondragover = event => {
+  if (!event.dataTransfer?.types.includes('Files')) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = !busy && selected?.image === '지원' ? 'copy' : 'none';
+  element('compose').classList.toggle('is-drop-target', !busy && selected?.image === '지원');
+};
+stage.ondragleave = event => {
+  if (!(event.relatedTarget instanceof Node && stage.contains(event.relatedTarget))) element('compose').classList.remove('is-drop-target');
+};
+stage.ondrop = event => {
+  const files = event.dataTransfer?.files;
+  if (!files?.length) return;
+  event.preventDefault();
+  element('compose').classList.remove('is-drop-target');
+  if (files.length === 1) void attachImage(files[0]);
+  else status.textContent = '한 메시지에는 이미지 한 장을 첨부할 수 있어요.';
+};
+for (const type of ['dragover', 'drop'] as const) {
+  window.addEventListener(type, event => {
+    if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
+  });
+}
+for (const id of ['connect', 'start', 'send', 'stop']) {
+  const button = element(id);
+  const origin = (event: PointerEvent) => {
+    const bounds = button.getBoundingClientRect();
+    button.style.setProperty('--mx', (event.clientX - bounds.left) + 'px');
+    button.style.setProperty('--my', (event.clientY - bounds.top) + 'px');
+  };
+  button.onpointerenter = button.onpointerleave = origin;
+}
 message.oninput = () => { resizeMessage(); updateSend(); };
 message.onkeydown = event => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
@@ -394,6 +534,7 @@ element('compose').onsubmit = async event => {
   event.preventDefault();
   const content = message.value.trim();
   if (busy || !selected || (!content && !attachment)) return;
+  if (attachment && selected.image !== '지원') { status.textContent = imageSupportHint(); return; }
   if (selected.image !== '지원' && thread?.turns.some(turn => turn.image)) {
     status.textContent = '이미지가 있는 대화입니다. 이미지를 지원하는 모델을 선택하거나 새 대화를 시작해 주세요.';
     return;
@@ -424,34 +565,38 @@ element('compose').onsubmit = async event => {
   renderTurn(user);
   update();
   const reply: Turn = {role:'assistant', content:''};
-  const body = renderTurn(reply);
+  const { content: replyView, article } = renderTurn(reply, true);
+  const liveText = document.createTextNode('');
+  replyView.append(liveText);
   turns.scrollTop = turns.scrollHeight;
-  const channel = new Channel<StreamEvent>();
-  let inputTokens: number | undefined;
-  let outputTokens: number | undefined;
+  const channel = new Channel<StreamText>();
   channel.onmessage = chunk => {
     if (chunk.type === 'text' && chunk.text) {
       const follow = turns.scrollHeight - turns.scrollTop - turns.clientHeight < 90;
       if (!reply.content) status.textContent = '답변을 작성하고 있습니다.';
-      reply.content += chunk.text; body.appendData(chunk.text);
+      reply.content += chunk.text; liveText.appendData(chunk.text);
       if (follow) turns.scrollTop = turns.scrollHeight;
-    } else if (chunk.type === 'usage') {
-      inputTokens = chunk.input ?? inputTokens;
-      outputTokens = chunk.output ?? outputTokens;
     }
   };
   status.textContent = '응답을 기다리고 있습니다.';
   try {
-    await invoke('send_chat', {modelId,messages,onEvent:channel,requestId});
-    const usage = [inputTokens === undefined ? '' : '입력 ' + inputTokens, outputTokens === undefined ? '' : '출력 ' + outputTokens].filter(Boolean).join(', ');
-    status.textContent = usage ? '사용한 토큰 수: ' + usage : '';
+    const result = await invoke<ChatResult>('send_chat', {modelId,messages,onEvent:channel,requestId});
+    if (selected?.id === modelId && selected.access === 'unconfirmed') selected.access = 'verified';
+    reply.usage = result.usage;
+    if (result.interruption) reply.interrupted = true;
+    status.textContent = result.interruption ?? '';
   } catch (error) {
     reply.interrupted = true;
-    body.parentElement?.append(document.createElement('br'), '응답이 중단되었습니다.');
-    status.textContent = feedback(error);
+    status.textContent = explainSchoolError(error);
   }
   active.turns.push(reply); active.updated = Date.now();
-  if (body.parentElement) addCopyButton(body.parentElement, reply);
+  const follow = turns.scrollHeight - turns.scrollTop - turns.clientHeight < 90;
+  article.classList.remove('streaming');
+  renderMarkdown(replyView, reply.content);
+  if (reply.interrupted) article.append('응답이 중단되었습니다.');
+  addCopyButton(article, reply);
+  addUsage(article, reply.usage);
+  if (follow) turns.scrollTop = turns.scrollHeight;
   requestId = null; canCancel = false; update();
   try { await writeThread(active); await refreshHistory(); }
   catch (error) { status.textContent += ' 응답을 저장하지 못했습니다. ' + feedback(error); }

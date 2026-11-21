@@ -1,0 +1,110 @@
+html:root {
+  color-scheme: light;
+  --shell-bg: #f3f5ef;
+  --shell-side: #e9eee5;
+  --shell-surface: #f9faf6;
+  --shell-raise: #e1e9db;
+  --shell-text: #193522;
+  --shell-body: #293d30;
+  --shell-muted: #536655;
+  --shell-focus: #476422;
+  --shell-edge: rgb(37 72 45 / 30%);
+  --shell-line: rgb(37 72 45 / 17%);
+  --shell-hover: rgb(37 72 45 / 8%);
+  --violet: #327647;
+  --danger: #a32932;
+  --disabled: #657565;
+  --tab-fill: #d0e89a;
+  --fill: #2d8451;
+  --action-hover: #1f613b;
+  --model-alt: #606e30;
+  --brand-tile: #b1dfb8;
+  --brand-ink: #102217;
+  --brand-fill: var(--fill);
+  --on-green: #f4ffef;
+}
+html:root[data-appearance="dark"] {
+  color-scheme: dark;
+  --shell-bg: #0b140f;
+  --shell-side: #0e1b14;
+  --shell-surface: #17271d;
+  --shell-raise: #1e2d23;
+  --shell-text: #edf5e9;
+  --shell-body: #dce8db;
+  --shell-muted: #a4b5a8;
+  --shell-focus: #cbe68e;
+  --shell-edge: rgb(182 220 174 / 24%);
+  --shell-line: rgb(182 220 174 / 13%);
+  --shell-hover: rgb(182 220 174 / 8%);
+  --violet: #85c99a;
+  --danger: #ff9696;
+  --disabled: #8c9e90;
+  --tab-fill: var(--shell-focus);
+}
+
+html:root #setup .primary:enabled,
+html:root #workspace .round-button:enabled {
+  background: var(--fill);
+  color: var(--on-green);
+}
+html:root #setup .primary::before,
+html:root #workspace .round-button::before { background:var(--action-hover); }
+html:root #setup .primary:is(:hover,:focus-visible):enabled,
+html:root #workspace .round-button:is(:hover,:focus-visible):enabled,
+html:root #setup #connect[aria-busy="true"] {
+  background: var(--fill);
+  color: var(--on-green);
+}
+html:root :is(#setup,#workspace) button:disabled { color:var(--disabled); }
+html:root .success-mark,
+html:root #schoolError button,
+html:root ::selection { color:var(--on-green); }
+html:root #schoolError .error-label,
+html:root #keyForm:has([aria-invalid="true"]) #keyStatus,
+html:root #setup #removeKey,
+html:root .removal-dialog button:last-child { color:var(--danger); }
+html:root .key-field:has([aria-invalid="true"]) { border-color:var(--danger); box-shadow:0 0 0 1px var(--danger); }
+html:root body { scrollbar-color:var(--shell-edge) transparent; }
+html:root .connected-dot { background:var(--violet); }
+html:root #workspace .copy-answer.done { color:var(--violet); }
+html:root .input-hint kbd { color:var(--shell-focus); }
+
+html:root dialog.model-picker {
+  color-scheme: inherit;
+  --bg: var(--shell-bg);
+  --text: var(--shell-text);
+  --muted: var(--shell-muted);
+  --raise: var(--shell-raise);
+  --vf: var(--fill);
+  --bf: var(--model-alt);
+  --hover: var(--shell-hover);
+  --line: var(--shell-line);
+}
+html:root .model-picker :is(.slab,.pk-close,.pk-tab):focus-visible { outline-color:var(--shell-focus); }
+html:root .model-picker .pk-tab[aria-selected="true"] {
+  background: var(--tab-fill);
+  color: var(--brand-ink);
+}
+html:root .model-picker .slab .kc,
+html:root .model-picker .slab:is(:hover,:focus-visible,.on),
+html:root .model-picker .slab:is(:hover,:focus-visible,.on) .s-desc { color:var(--on-green); }
+html:root .model-picker .slab:is(:hover,:focus-visible,.on) .kc,
+html:root .model-picker .pill {
+  background: var(--tab-fill);
+  color: var(--brand-ink);
+}
+html:root :is(#setup,#workspace) .appearance-toggle {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 6px;
+  margin-inline-start: auto;
+  padding: 5px 9px;
+  color: var(--shell-body);
+  background: var(--shell-raise);
+  font-size: 13px;
+  white-space: nowrap;
+}
+html:root :is(#setup,#workspace) .appearance-toggle:hover { background:var(--tab-fill); color:var(--brand-ink); }
+html:root :is(#setup,#workspace) .appearance-toggle:focus-visible { outline:2px solid var(--shell-focus); outline-offset:2px; }
+html:root .appearance-toggle svg { width:16px; height:16px; flex:none; }

@@ -1,19 +1,17 @@
-﻿import { normalizeModels } from './models';
+﻿import { normalizeModels, supportedModelIds } from './models';
 import { openModelPicker } from './picker';
+import './fonts.css';
+import './green.css';
 
-const examples = normalizeModels({ data: [
-  { id: 'gpt-4o', input_modalities: ['text', 'image'] },
-  { id: 'claude-sonnet-example' },
-  { id: 'gpt-text-example', input_modalities: ['text'] }
-] });
+const examples = normalizeModels({ data: supportedModelIds.map(id => ({ id })) });
 let current = examples[0];
 const open = document.querySelector<HTMLButtonElement>('#open')!;
 const label = document.querySelector<HTMLElement>('#chosen')!;
-const glyph = document.querySelector<HTMLElement>('.preview-gauge')!;
+const glyph = document.querySelector<HTMLElement>('.preview-swatch')!;
 
 function renderSelection() {
   label.textContent = current.id;
-  glyph.style.transform = 'rotate(' + examples.indexOf(current) * 360 / examples.length + 'deg)';
+  glyph.style.backgroundColor = examples.indexOf(current) % 2 ? 'var(--model-alt)' : 'var(--fill)';
 }
 
 function show() {
