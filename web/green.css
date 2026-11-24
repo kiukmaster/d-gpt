@@ -81,6 +81,7 @@ html:root dialog.model-picker {
   --line: var(--shell-line);
 }
 html:root .model-picker :is(.slab,.pk-close,.pk-tab):focus-visible { outline-color:var(--shell-focus); }
+html:root:not([data-appearance="dark"]) .model-picker .slab:focus-visible { outline-color:var(--on-green); }
 html:root .model-picker .pk-tab[aria-selected="true"] {
   background: var(--tab-fill);
   color: var(--brand-ink);

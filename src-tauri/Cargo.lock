@@ -689,7 +689,7 @@ dependencies = [
 
 [[package]]
 name = "d-gpt"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "base64 0.22.1",
  "flate2",

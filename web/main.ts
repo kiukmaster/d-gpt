@@ -2,6 +2,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import { normalizeModels, resolveModel, type SchoolModel } from './models';
 import { openModelPicker } from './picker';
 import { renderMarkdown } from './markdown';
+import { planContext, type ContextPlan } from './context';
 import { deleteThread, listThreads, readThread, writeThread, type Thread, type Turn, type Usage } from './history';
 import './fonts.css';
 import './shell.css';
@@ -18,7 +19,7 @@ const status = element('status');
 const keyStatus = element('keyStatus');
 const limit = 10 * 1024 * 1024;
 type StreamText = { type: 'text'; text: string };
-type ChatResult = { usage?: Usage; interruption?: string };
+type ChatResult = { usage?: Usage; interruption?: string; summary?: string };
 let models: SchoolModel[] = [];
 let selected: SchoolModel | null = null;
 let thread: Thread | null = null;
@@ -28,6 +29,7 @@ let busy = false;
 let requestId: string | null = null;
 let connected = false;
 let canCancel = false;
+let stopRequested = false;
 
 function feedback(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -68,9 +70,9 @@ function update() {
   element('attach').title = imageSupported ? '이미지 선택, 붙여넣기 또는 끌어다 놓기' : imageSupportHint();
   element<HTMLButtonElement>('removeImage').disabled = busy;
   element('removeImage').hidden = !attachment;
-  if (!attachment && previewUrl) {
+  if (!attachment) {
     element('attachmentPreview').removeAttribute('src');
-    URL.revokeObjectURL(previewUrl);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
     previewUrl = undefined;
   }
   updateSend();
@@ -106,7 +108,8 @@ function showWorkspace() {
   element('setup').hidden = true;
   element('workspace').hidden = false;
   key.value = '';
-  renderThread();
+  updateConversationLayout();
+  update();
 }
 async function loadModels(raw: {data:unknown[]}) {
   models = normalizeModels(raw);
@@ -187,8 +190,12 @@ element('openSchool').onclick = async () => {
   try { await invoke('open_school_site'); }
   catch (error) { keyStatus.textContent = feedback(error); }
 };
-element('manage').onclick = () => { keyStatus.textContent = ''; showSetup(true); };
-element('back').onclick = () => { showWorkspace(); message.focus(); };
+element('manage').onclick = () => {
+  if (narrow.matches) setSidebar(false);
+  keyStatus.textContent = '';
+  showSetup(true);
+};
+element('back').onclick = () => { showWorkspace(); message.focus({ preventScroll: true }); };
 
 async function confirmRemoval(prompt: string) {
   const dialog = document.createElement('dialog');
@@ -318,11 +325,36 @@ function renderThread() {
   updateConversationLayout();
   turns.replaceChildren();
   thread?.turns.forEach(turn => renderTurn(turn));
+  if (thread?.checkpoint) showCheckpoint(thread);
   turns.scrollTop = turns.scrollHeight;
   update();
 }
-function resetConversation() {
-  thread = null; attachment = undefined; message.value = ''; status.textContent = '';
+function showCheckpoint(active: Thread) {
+  turns.querySelector('.context-summary')?.remove();
+  const checkpoint = active.checkpoint;
+  if (!checkpoint) return;
+  const anchor = turns.querySelectorAll('article')[checkpoint.through - 1];
+  if (!anchor) return;
+  const details = document.createElement('details');
+  details.className = 'turn-usage context-summary';
+  const label = document.createElement('summary');
+  label.textContent = '이전 메시지 ' + tokenNumber.format(checkpoint.through) + '개 요약 보기';
+  const note = document.createElement('p');
+  note.textContent = checkpoint.text;
+  details.append(label, note);
+  const usage = checkpoint.usage;
+  if (usage?.input !== undefined || usage?.output !== undefined) {
+    const cost = document.createElement('small');
+    const values = [];
+    if (usage.input !== undefined) values.push('입력 ' + tokenNumber.format(usage.input));
+    if (usage.output !== undefined) values.push('출력 ' + tokenNumber.format(usage.output));
+    cost.textContent = '최근 요약 요청의 토큰 사용량 (' + values.join(', ') + ')';
+    details.append(cost);
+  }
+  anchor.after(details);
+}
+function resetConversation(next: Thread | null = null) {
+  thread = next; attachment = undefined; message.value = ''; status.textContent = '';
   renderThread();
 }
 async function refreshHistory() {
@@ -351,15 +383,19 @@ async function refreshHistory() {
       open.setAttribute('aria-current', String(entry.id === thread?.id));
       open.onclick = async () => {
         if (busy) return;
-        busy = true; update();
-        try {
-          const loaded = await readThread(entry.id);
-          resetConversation(); thread = loaded; renderThread();
-          if (narrow.matches) setSidebar(false);
-          nav.querySelector('[aria-current=true]')?.setAttribute('aria-current','false');
-          open.setAttribute('aria-current','true');
-        } catch (error) { status.textContent = feedback(error); }
-        finally { busy = false; update(); }
+        if (entry.id !== thread?.id) {
+          busy = true; update();
+          try {
+            resetConversation(await readThread(entry.id));
+            nav.querySelector('[aria-current=true]')?.setAttribute('aria-current','false');
+            open.setAttribute('aria-current','true');
+          } catch (error) { status.textContent = feedback(error); }
+          finally { busy = false; update(); }
+        }
+        if (narrow.matches) {
+          setSidebar(false);
+          message.focus({ preventScroll: true });
+        }
       };
       const remove = document.createElement('button');
       remove.textContent = '×';
@@ -387,9 +423,11 @@ element('newChat').onclick = () => {
 };
 const narrow = matchMedia('(max-width:720px)');
 function setSidebar(open: boolean) {
+  const overlay = open && narrow.matches;
   element('sidebar').hidden = !open;
   element('toggle').hidden = open;
-  element('sideBackdrop').hidden = !open || !narrow.matches;
+  element('sideBackdrop').hidden = !overlay;
+  element('chatStage').inert = overlay;
   element('toggle').setAttribute('aria-expanded', String(open));
 }
 setSidebar(!narrow.matches);
@@ -526,41 +564,75 @@ message.onkeydown = event => {
 };
 element('stop').onclick = async () => {
   if (!requestId || !canCancel) return;
+  stopRequested = true;
   canCancel = false; update();
   try { await invoke('cancel_chat', {requestId}); }
   catch (error) { status.textContent = feedback(error); canCancel = Boolean(requestId); update(); }
 };
+function contextError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'contextLimit' in error && error.contextLimit === true;
+}
+
 element('compose').onsubmit = async event => {
   event.preventDefault();
   const content = message.value.trim();
   if (busy || !selected || (!content && !attachment)) return;
   if (attachment && selected.image !== '지원') { status.textContent = imageSupportHint(); return; }
-  if (selected.image !== '지원' && thread?.turns.some(turn => turn.image)) {
-    status.textContent = '이미지가 있는 대화입니다. 이미지를 지원하는 모델을 선택하거나 새 대화를 시작해 주세요.';
-    return;
-  }
   const active: Thread = thread ?? {id:crypto.randomUUID(), title:(content || '이미지 질문').slice(0,45), updated:Date.now(), turns:[]};
   const user: Turn = {role:'user', content, ...(attachment ? {image:attachment} : {})};
-  const messages = [...active.turns.filter(turn => turn.content || turn.image), user].map(({role,content,image}) => ({role,content,...(image ? {image} : {})}));
-  if (messages.reduce((bytes, item) => bytes + (item.image?.data.length ?? 0) + item.content.length, 0) >= limit) {
-    status.textContent = '이 대화와 첨부를 합치면 학교의 10 MiB 한도를 넘습니다. 첨부를 줄이거나 새 대화를 시작해 주세요.';
-    return;
-  }
+  const previous = active.turns.slice();
   const modelId = selected.id;
+  const supportsImages = selected.image === '지원';
+  let summaryCalls = 0;
+  async function prepare(plan: ContextPlan): Promise<Turn[]> {
+    while (plan.kind !== 'too-large') {
+      if (stopRequested) throw Error('요청을 중지했습니다.');
+      if (!supportsImages && plan.messages.some(turn => turn.image)) {
+        throw Error('아직 요약되지 않은 이미지가 있습니다. 이미지를 지원하는 모델을 선택해 주세요.');
+      }
+      if (plan.kind === 'ready') return plan.messages;
+      if (summaryCalls >= 3) throw Error('오래된 대화 일부를 요약해 저장했습니다. 질문을 다시 보내면 이어서 정리합니다.');
+      summaryCalls++;
+      status.textContent = '이전 대화를 요약하고 있어요. 선택한 모델의 입력과 출력 토큰이 사용됩니다.';
+      const result = await invoke<ChatResult>('send_chat', {modelId, messages:plan.messages, onEvent:null, requestId});
+      if (stopRequested) throw Error('요청을 중지했습니다.');
+      const text = result.summary?.trim();
+      if (result.interruption || !text || text.length > 8_000) {
+        throw Error('완성된 대화 요약을 받지 못했습니다. 원문은 그대로 보관되어 있습니다.');
+      }
+      const checkpoint = {through:plan.through, text, usage:result.usage};
+      await writeThread({...active, checkpoint});
+      active.checkpoint = checkpoint;
+      showCheckpoint(active);
+      plan = planContext(previous, user, checkpoint);
+    }
+    throw Error(plan.reason);
+  }
   const originalDraft = message.value;
   message.value = '';
-  busy = true; update();
+  busy = true; stopRequested = false; requestId = crypto.randomUUID(); canCancel = true; update();
+  let messages: Turn[];
+  function restoreDraft() {
+    message.value = originalDraft + (message.value ? '\n' + message.value : '');
+    resizeMessage();
+  }
+  try { messages = await prepare(planContext(previous, user, active.checkpoint)); }
+  catch (error) {
+    restoreDraft();
+    requestId = null; canCancel = false; busy = false; update();
+    status.textContent = explainSchoolError(error);
+    return;
+  }
   active.turns.push(user); active.updated = Date.now();
   try { await writeThread(active); }
   catch (error) {
     active.turns.pop();
-    message.value = originalDraft + (message.value ? '\n' + message.value : '');
-    busy = false; update();
+    restoreDraft();
+    requestId = null; canCancel = false; busy = false; update();
     status.textContent = '질문을 저장하지 못했습니다. ' + feedback(error); return;
   }
   thread = active;
   attachment = undefined;
-  requestId = crypto.randomUUID(); canCancel = true;
   updateConversationLayout();
   renderTurn(user);
   update();
@@ -569,18 +641,41 @@ element('compose').onsubmit = async event => {
   const liveText = document.createTextNode('');
   replyView.append(liveText);
   turns.scrollTop = turns.scrollHeight;
+  let pendingText = '';
+  let paintFrame: number | undefined;
+  function paintStream() {
+    paintFrame = undefined;
+    const follow = turns.scrollHeight - turns.scrollTop - turns.clientHeight < 90;
+    liveText.appendData(pendingText);
+    pendingText = '';
+    if (follow) turns.scrollTop = turns.scrollHeight;
+  }
   const channel = new Channel<StreamText>();
   channel.onmessage = chunk => {
     if (chunk.type === 'text' && chunk.text) {
-      const follow = turns.scrollHeight - turns.scrollTop - turns.clientHeight < 90;
       if (!reply.content) status.textContent = '답변을 작성하고 있습니다.';
-      reply.content += chunk.text; liveText.appendData(chunk.text);
-      if (follow) turns.scrollTop = turns.scrollHeight;
+      reply.content += chunk.text;
+      pendingText += chunk.text;
+      paintFrame ??= requestAnimationFrame(paintStream);
     }
   };
   status.textContent = '응답을 기다리고 있습니다.';
+  const sendAnswer = () => invoke<ChatResult>('send_chat', {modelId,messages,onEvent:channel,requestId});
+  let retryingContext = false;
   try {
-    const result = await invoke<ChatResult>('send_chat', {modelId,messages,onEvent:channel,requestId});
+    if (stopRequested) throw Error('요청을 중지했습니다.');
+    let result: ChatResult;
+    try { result = await sendAnswer(); }
+    catch (error) {
+      if (stopRequested || reply.content || !contextError(error)) throw error;
+      const retry = planContext(previous, user, active.checkpoint, true);
+      if (retry.kind !== 'compact') throw error;
+      retryingContext = true;
+      messages = await prepare(retry);
+      retryingContext = false;
+      status.textContent = '요약한 대화로 응답을 기다리고 있습니다.';
+      result = await sendAnswer();
+    }
     if (selected?.id === modelId && selected.access === 'unconfirmed') selected.access = 'verified';
     reply.usage = result.usage;
     if (result.interruption) reply.interrupted = true;
@@ -588,6 +683,24 @@ element('compose').onsubmit = async event => {
   } catch (error) {
     reply.interrupted = true;
     status.textContent = explainSchoolError(error);
+    if (retryingContext) {
+      // The original answer was rejected before producing text. Put the unsent draft back only after the rollback is durable.
+      const priorThread = {...active, turns:previous};
+      try {
+        await writeThread(priorThread);
+        active.turns = previous;
+        attachment = user.image;
+        if (attachment) element<HTMLImageElement>('attachmentPreview').src = 'data:' + attachment.mime + ';base64,' + attachment.data;
+        restoreDraft();
+        renderThread();
+        requestId = null; canCancel = false; busy = false; update(); message.focus();
+        return;
+      } catch (saveError) {
+        status.textContent += ' 질문을 입력창으로 되돌리지 못했습니다. ' + feedback(saveError);
+      }
+    }
+  } finally {
+    if (paintFrame !== undefined) cancelAnimationFrame(paintFrame);
   }
   active.turns.push(reply); active.updated = Date.now();
   const follow = turns.scrollHeight - turns.scrollTop - turns.clientHeight < 90;

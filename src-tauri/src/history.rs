@@ -28,6 +28,21 @@ pub(crate) struct Turn {
     interrupted: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     usage: Option<super::Usage>,
+    #[serde(default, deserialize_with = "read_checkpoint", skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<ContextCheckpoint>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ContextCheckpoint {
+    through: usize,
+    text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    usage: Option<super::Usage>,
+}
+
+fn read_checkpoint<'de, D: serde::Deserializer<'de>>(reader: D) -> std::result::Result<Option<ContextCheckpoint>, D::Error> {
+    let value = serde_json::Value::deserialize(reader)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -42,6 +57,8 @@ pub(crate) struct Thread {
     #[serde(flatten)]
     summary: Summary,
     turns: Vec<Turn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<ContextCheckpoint>,
 }
 
 fn folder(app: &AppHandle) -> Result<PathBuf> {
@@ -105,12 +122,20 @@ pub(crate) async fn read_thread(app: AppHandle, id: String) -> Result<Thread> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut reader = BufReader::new(File::open(path).map_err(|_| READ)?);
         let (summary, method) = header(&mut reader, &id)?;
-        let turns = if method == 1 {
+        let mut turns: Vec<Turn> = if method == 1 {
             serde_json::from_reader(DeflateDecoder::new(reader))
         } else {
             serde_json::from_reader(reader)
         }.map_err(|_| INVALID)?;
-        Ok(Thread { summary, turns })
+        let mut checkpoint = None;
+        for (index, turn) in turns.iter_mut().enumerate() {
+            if let Some(saved) = turn.checkpoint.take() {
+                if saved.through == index + 1 && !saved.text.trim().is_empty() {
+                    checkpoint = Some(saved);
+                }
+            }
+        }
+        Ok(Thread { summary, turns, checkpoint })
     }).await.map_err(|_| READ)?
 }
 
@@ -118,6 +143,16 @@ pub(crate) async fn read_thread(app: AppHandle, id: String) -> Result<Thread> {
 pub(crate) async fn write_thread(app: AppHandle, thread: Thread) -> Result<()> {
     let path = file_for(&app, &thread.summary.id)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let mut thread = thread;
+        for turn in &mut thread.turns { turn.checkpoint = None; }
+        if let Some(checkpoint) = thread.checkpoint.take() {
+            if checkpoint.through == 0 || checkpoint.through > thread.turns.len() || checkpoint.text.trim().is_empty() {
+                return Err(INVALID);
+            }
+            // Older readers ignore this field and retain the full conversation.
+            let index = checkpoint.through - 1;
+            thread.turns[index].checkpoint = Some(checkpoint);
+        }
         let dir = path.parent().ok_or(WRITE)?;
         fs::create_dir_all(dir).map_err(|_| WRITE)?;
         let title = thread.summary.title.as_bytes();

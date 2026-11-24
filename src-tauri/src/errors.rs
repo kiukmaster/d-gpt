@@ -12,6 +12,8 @@ pub(crate) enum CommandError {
         kind: &'static str,
         status: u16,
         code: Option<String>,
+        #[serde(rename = "contextLimit", skip_serializing_if = "Option::is_none")]
+        context_limit: Option<bool>,
         reason: &'static str,
         action: &'static str,
     },
@@ -28,10 +30,13 @@ impl CommandError {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty() && s.len() <= 80 && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'));
         let message = body.pointer("/error/message").and_then(Value::as_str);
+        let context_limit = code == Some("context_length_exceeded") ||
+            (claude && status == 400 && code == Some("invalid_request_error") &&
+                message.is_some_and(|text| text.to_ascii_lowercase().starts_with("prompt is too long")));
         let guidance = match (code, message, status) {
             (_, Some("request body too large"), _) | (_, _, 413) =>
                 ("질문과 첨부 파일의 전체 크기가 너무 큽니다.", "질문을 줄이거나 더 작은 이미지를 첨부해 주세요."),
-            (Some("context_length_exceeded"), _, _) =>
+            _ if context_limit =>
                 ("대화가 모델의 입력 길이 한도에 도달했습니다.", "질문을 줄이거나 새 대화를 시작해 주세요."),
             (Some("insufficient_credit"), _, _) | (_, Some("insufficient credit balance for this request"), 402) =>
                 ("학교 크레딧 잔액이 이번 요청에 필요한 금액보다 적습니다.", "학교에서 크레딧 잔액을 확인하고 충전한 뒤 다시 시도해 주세요."),
@@ -61,7 +66,8 @@ impl CommandError {
                 ("학교 서버에서 요청을 처리하는 중 오류가 발생했습니다.", "잠시 후 다시 시도해 주세요. 반복되면 학교 담당자에게 오류 정보를 알려 주세요."),
             _ => ("학교 서버가 요청을 끝까지 처리하지 못했습니다.", "잠시 후 다시 시도해 주세요. 반복되면 학교 담당자에게 오류 정보를 알려 주세요."),
         };
-        Self::School { kind: "school_api", status, code: code.map(str::to_owned), reason: guidance.0, action: guidance.1 }
+        Self::School { kind: "school_api", status, code: code.map(str::to_owned),
+            context_limit: context_limit.then_some(true), reason: guidance.0, action: guidance.1 }
     }
 }
 

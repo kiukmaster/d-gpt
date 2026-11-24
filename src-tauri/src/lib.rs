@@ -7,7 +7,7 @@ use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::{hash_map::RandomState, HashMap}, hash::BuildHasher, time::Duration};
-use tauri::{ipc::Channel, State};
+use tauri::{ipc::{Channel, JavaScriptChannelId}, State, Webview};
 use tokio::sync::{oneshot, Mutex};
 
 const HOST: &str = "https://gpt-gw.daegu.ac.kr";
@@ -186,6 +186,8 @@ enum Event {
 #[derive(Serialize)]
 struct ChatResult {
     #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<Usage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     interruption: Option<&'static str>,
@@ -235,7 +237,7 @@ impl Usage {
     }
 }
 
-fn dispatch(data: &str, status: u16, claude: bool, channel: &Channel<Event>, finish: &mut Option<String>, usage: &mut Usage) -> ApiResult<bool> {
+fn dispatch(data: &str, status: u16, claude: bool, emit: &mut impl FnMut(&str) -> ApiResult<()>, finish: &mut Option<String>, usage: &mut Usage) -> ApiResult<bool> {
     if !claude && data.trim() == "[DONE]" { return Ok(true); }
     let value: Value = serde_json::from_str(data).map_err(|_| FORMAT)?;
     if value.get("error").is_some() || value["type"] == "error" {
@@ -246,7 +248,7 @@ fn dispatch(data: &str, status: u16, claude: bool, channel: &Channel<Event>, fin
     if let Some(reason) = reason.and_then(Value::as_str) { *finish = Some(reason.to_owned()); }
     let text = if claude { value.pointer("/delta/text") } else { value.pointer("/choices/0/delta/content") };
     if let Some(text) = text.and_then(Value::as_str).filter(|s| !s.is_empty()) {
-        channel.send(Event::Text { text: text.to_owned() }).map_err(|_| "대화 화면이 닫혔습니다.")?;
+        emit(text)?;
     }
     if claude {
         if let Some(start) = value.pointer("/message/usage") { usage.update_claude(start, false); }
@@ -259,7 +261,17 @@ fn dispatch(data: &str, status: u16, claude: bool, channel: &Channel<Event>, fin
     Ok(false)
 }
 
-async fn stream(mut response: Response, claude: bool, channel: &Channel<Event>) -> ApiResult<ChatResult> {
+async fn stream(mut response: Response, claude: bool, channel: Option<&Channel<Event>>) -> ApiResult<ChatResult> {
+    let mut summary = String::new();
+    let mut emit = |text: &str| -> ApiResult<()> {
+        if let Some(channel) = channel {
+            channel.send(Event::Text { text: text.to_owned() }).map_err(|_| "대화 화면이 닫혔습니다.")?;
+        } else {
+            if summary.len() + text.len() > 32 * 1024 { return Err("요약 길이 한도에 도달했습니다.".into()); }
+            summary.push_str(text);
+        }
+        Ok(())
+    };
     let mut finish = None;
     let mut usage = Usage::default();
     let mut line = Vec::new();
@@ -276,14 +288,14 @@ async fn stream(mut response: Response, claude: bool, channel: &Channel<Event>) 
             }
             let field = std::str::from_utf8(&line).map_err(|_| FORMAT)?;
             if field.is_empty() && !data.is_empty() {
-                if dispatch(data.trim_end_matches('\n'), response.status().as_u16(), claude, channel, &mut finish, &mut usage)? {
+                if dispatch(data.trim_end_matches('\n'), response.status().as_u16(), claude, &mut emit, &mut finish, &mut usage)? {
                     usage.total = usage.total.or_else(|| usage.input?.checked_add(usage.output?));
                     let interruption = match finish.as_deref().ok_or("답변 완료 상태를 확인할 수 없습니다.")? {
                         "length" | "max_tokens" | "model_context_window_exceeded" => Some("답변 길이 한도에 도달했습니다."),
                         "content_filter" | "refusal" => Some("모델이 답변 생성을 중단했습니다."),
                         _ => None,
                     };
-                    return Ok(ChatResult { usage: (usage != Usage::default()).then_some(usage), interruption });
+                    return Ok(ChatResult { summary: channel.is_none().then_some(summary), usage: (usage != Usage::default()).then_some(usage), interruption });
                 }
                 data.clear();
             } else if let Some(part) = field.strip_prefix("data:") {
@@ -296,7 +308,7 @@ async fn stream(mut response: Response, claude: bool, channel: &Channel<Event>) 
     Err("답변을 모두 받기 전에 연결이 끊어졌습니다.".into())
 }
 
-async fn chat(state: &Gateway, model_id: &str, messages: Vec<Message>, channel: &Channel<Event>) -> ApiResult<ChatResult> {
+async fn chat(state: &Gateway, model_id: &str, messages: Vec<Message>, channel: Option<&Channel<Event>>) -> ApiResult<ChatResult> {
     if !supported_model(model_id) { return Err("지원하지 않는 모델입니다.".into()); }
     let claude = model_id.starts_with("claude-");
     let (key, model) = {
@@ -330,7 +342,7 @@ async fn chat(state: &Gateway, model_id: &str, messages: Vec<Message>, channel: 
 }
 
 #[tauri::command]
-async fn send_chat(model_id: String, messages: Vec<Message>, on_event: Channel<Event>, request_id: String, state: State<'_, Gateway>) -> ApiResult<ChatResult> {
+async fn send_chat(model_id: String, messages: Vec<Message>, on_event: Option<JavaScriptChannelId>, request_id: String, webview: Webview, state: State<'_, Gateway>) -> ApiResult<ChatResult> {
     if request_id.is_empty() || request_id.len() > 128 { return Err("요청 번호를 확인해 주세요.".into()); }
     let (sender, receiver) = oneshot::channel();
     {
@@ -338,10 +350,11 @@ async fn send_chat(model_id: String, messages: Vec<Message>, on_event: Channel<E
         if active.contains_key(&request_id) { return Err("이미 진행 중인 요청입니다.".into()); }
         active.insert(request_id.clone(), Some(sender));
     }
+    let channel = on_event.map(|id| id.channel_on(webview));
     let result = tokio::select! {
         biased;
         _ = receiver => Err("답변 생성을 중지했습니다.".into()),
-        result = chat(&state, &model_id, messages, &on_event) => result,
+        result = chat(&state, &model_id, messages, channel.as_ref()) => result,
     };
     state.active.lock().await.remove(&request_id);
     result

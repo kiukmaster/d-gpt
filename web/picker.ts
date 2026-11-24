@@ -118,6 +118,7 @@ export function openModelPicker(models: readonly SchoolModel[], currentId: strin
     orderLabel.title = '제조사가 공개한 실무 과제 점수가 높은 모델부터 표시합니다.';
     stack.className = 'stack rows d2';
     slabs = visible.map(createSlab);
+    stack.tabIndex = slabs.length ? -1 : 0;
     stack.replaceChildren(...slabs);
     if (!slabs.length) {
       stack.append(element('p', 'mp-empty', '이 키로 사용할 수 있는 ' + activeTab.textContent + ' 모델이 없습니다.'));
@@ -179,7 +180,7 @@ export function openModelPicker(models: readonly SchoolModel[], currentId: strin
   position();
   dialog.showModal();
   opener?.setAttribute('aria-expanded', 'true');
-  (slabs.find(slab => slab.classList.contains('on')) ?? tabs[providers.indexOf(provider)]).focus({ preventScroll: true });
+  (slabs.find(slab => slab.classList.contains('on')) ?? tabs[providers.indexOf(provider)]).focus();
   void stack.offsetWidth;
   dialog.classList.add('picking');
 }
